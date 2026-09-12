@@ -1,0 +1,56 @@
+diff --git a/apps/desktop/electron/main.ts b/apps/desktop/electron/main.ts
+index 56342dfb5c..f2ab08cad7 100644
+--- a/apps/desktop/electron/main.ts
++++ b/apps/desktop/electron/main.ts
+@@ -12,6 +12,7 @@ import {
+   app,
+   BrowserWindow,
+   clipboard,
++  desktopCapturer,
+   dialog,
+   net as electronNet,
+   webContents as electronWebContents,
+@@ -689,6 +690,43 @@ ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
+ // once the work settles.
+ app.commandLine.appendSwitch('disable-renderer-backgrounding')
+ 
++// ─── Local patch (2026-09-12): system-audio loopback for audio-visualizer ───
++// Codex-style "audio visualization": the renderer's AnalyserNode rides the
++// system output via Chromium's loopback audio (Core Audio taps, "Catap" in
++// Chromium 140 — the older MacSck*/MacLoopback* feature names are gone).
++// Known upstream breakage (electron#49607): an audio-only getDisplayMedia
++// request fails with "Error starting capture" on this stack. The documented
++// workaround: the renderer requests a tiny throwaway video track alongside
++// audio, and this handler grants a REAL screen source for the video plus
++// `audio: 'loopback'` for the system output mix. The plugin discards the
++// video track immediately; audio never leaves the process (FFT in RAM only).
++if (process.platform === 'darwin') {
++  app.commandLine.appendSwitch(
++    'enable-features',
++    'MacCatapLoopbackAudioForScreenShare'
++  )
++  // session.defaultSession only exists after the `ready` event — touching it
++  // at module scope throws "Session can only be received when app is ready"
++  // and killed startup (hotfixed 2026-09-12). appendSwitch above must stay
++  // pre-ready; only the handler registration moves into whenReady.
++  void app.whenReady().then(async () => {
++    let primaryScreen
++    try {
++      const sources = await desktopCapturer.getSources({ types: ['screen'] })
++      primaryScreen = sources[0]
++    } catch {
++      primaryScreen = undefined
++    }
++    session.defaultSession.setDisplayMediaRequestHandler(
++      (_request, callback) => {
++        callback({ video: primaryScreen, audio: 'loopback' })
++      },
++      { useSystemPicker: false }
++    )
++  })
++}
++// ─── end local patch ───
++
+ const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
+ 
+ // Build-time install stamp -- the git ref this .exe was built against.
