@@ -1,5 +1,7 @@
 # Hermes Audio Visualizer
 
+**English** | [简体中文](README.zh.md)
+
 A system-audio-driven rainbow spectrum for the **Hermes Desktop** status bar — 48 bars that dance to whatever your Mac is playing, plus a window-edge glow that breathes with the bass.
 
 Fully local: audio is analyzed in memory only (FFT via `AnalyserNode`), never recorded, never uploaded.
