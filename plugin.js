@@ -57,9 +57,14 @@ async function start() {
   audioCtx = new AudioContext()
   const src = audioCtx.createMediaStreamSource(s)
   analyser = audioCtx.createAnalyser()
-  analyser.fftSize = 512
-  analyser.smoothingTimeConstant = 0.5
-  src.connect(analyser)
+  analyser.fftSize = FFT_SIZE
+  analyser.smoothingTimeConstant = 0.4
+  bandEdges = buildBandEdges(audioCtx.sampleRate, analyser.frequencyBinCount)
+  // 入 analyser 前衰减，避免 8bit 映射把低频整片钉死在 255
+  const preGain = audioCtx.createGain()
+  preGain.gain.value = PRE_GAIN
+  src.connect(preGain)
+  preGain.connect(analyser)
   overlay = document.createElement('div')
   overlay.style.cssText =
     'position:fixed;inset:0;pointer-events:none;z-index:2147483000;opacity:0;transition:opacity 120ms linear;'
@@ -74,23 +79,74 @@ const SEGS = 48
 const W = 118
 const H = 24
 
+// ── 频谱幅度调校（2026-11-03）──────────────────────────────────────
+// 三个叠加问题会让频谱「看着没起伏」，这里一并修掉：
+//  1) loopback 电平很高，AnalyserNode 的 8bit 映射（minDecibels -100 /
+//     maxDecibels -30）会把整片低频钉死在 255 → 入 analyser 前先衰减 -12dB；
+//  2) 512 点 FFT @48kHz = 93.75Hz/bin，对数分频时前十几段全落在 bin 1，
+//     数值完全相同（看着像一整块）→ 改用 2048 点 FFT + 混合分频；
+//  3) raw**0.78 压缩动态范围、gain 又把峰值钉死 1.0（每帧必有一段满格）→
+//     改用更陡的幂次 + 动态扩展 + 顶部留白。
+const PRE_GAIN = 0.35            // -9 dB（118×24 小画布用 -9dB；200×32 版用 -12dB）
+const FFT_SIZE = 2048
+const LEVEL_POWER = 1.10
+const LEVEL_FLOOR = 0.05
+const LEVEL_HEADROOM = 0.92
+const BAND_LOW_HZ = 40
+const BAND_MID_HZ = 500
+const BAND_TOP_HZ = 11000
+const LOW_SEGS = 15              // 40-500Hz 线性段数（每段 ≈1 个 bin，互不重叠）
+let bandEdges = null
+
+// 低段线性（各段独立跳动）、高段对数（贴合听感）
+function buildBandEdges(sampleRate, binCount) {
+  const binHz = sampleRate / FFT_SIZE
+  const nb = Math.min(binCount, FFT_SIZE / 2)
+  const f2b = (f) => Math.max(1, Math.min(nb - 1, Math.round(f / binHz)))
+  const out = []
+  for (let i = 0; i < SEGS; i++) {
+    let f0, f1
+    if (i < LOW_SEGS) {
+      f0 = BAND_LOW_HZ + (BAND_MID_HZ - BAND_LOW_HZ) * (i / LOW_SEGS)
+      f1 = BAND_LOW_HZ + (BAND_MID_HZ - BAND_LOW_HZ) * ((i + 1) / LOW_SEGS)
+    } else {
+      const t0 = (i - LOW_SEGS) / (SEGS - LOW_SEGS)
+      const t1 = (i - LOW_SEGS + 1) / (SEGS - LOW_SEGS)
+      f0 = BAND_MID_HZ * Math.pow(BAND_TOP_HZ / BAND_MID_HZ, t0)
+      f1 = BAND_MID_HZ * Math.pow(BAND_TOP_HZ / BAND_MID_HZ, t1)
+    }
+    let lo = f2b(f0)
+    let hi = f2b(f1)
+    if (hi <= lo) hi = lo + 1
+    out.push([lo, hi])
+  }
+  return out
+}
+
 function loop() {
   if (!analyser) return
   const bins = new Uint8Array(analyser.frequencyBinCount)
   analyser.getByteFrequencyData(bins)
 
   const raw = []
+  const edges = bandEdges || []
   for (let i = 0; i < SEGS; i++) {
-    const lo = Math.max(1, Math.floor(Math.pow(250, i / SEGS)))
-    const hi = Math.max(lo + 1, Math.floor(Math.pow(250, (i + 1) / SEGS)))
+    const e = edges[i] || [1, 2]
+    const lo = e[0]
+    const hi = Math.min(e[1], bins.length)
     let sum = 0
     for (let k = lo; k < hi; k++) sum += bins[k] || 0
-    raw.push(sum / (hi - lo) / 255)
+    raw.push(sum / Math.max(1, hi - lo) / 255)
   }
-  const curved = raw.map((v) => Math.pow(v, 0.78))
+  const curved = raw.map((v) => Math.pow(v, LEVEL_POWER))
   gainPeak = Math.max(gainPeak * 0.975, Math.max(...curved))
   const gain = 1 / Math.max(gainPeak, 0.12)
-  const levels = curved.map((v) => Math.min(1, v * gain))
+  // 动态扩展（下切）+ 顶部留白：让起伏明显，不再每帧削顶
+  const levels = curved.map((v) => {
+    const g = Math.min(1, v * gain)
+    const e = Math.max(0, (g - LEVEL_FLOOR) / (1 - LEVEL_FLOOR))
+    return Math.min(LEVEL_HEADROOM, e)
+  })
 
   // canvas：DOM 直查（唯一真相源，与 React 生命周期完全解耦）
   const cv = document.querySelector('canvas[data-av-spectrum]')
@@ -120,7 +176,8 @@ function loop() {
   if (overlay) {
     let bs = 0
     for (let k = 2; k <= 10; k++) bs += bins[k] || 0
-    const bass = Math.min(1, Math.pow(bs / 9 / 255, 0.6) * 2.2)
+    // 除以 PRE_GAIN 抵消入 analyser 前的衰减，辉光灵敏度保持不变
+    const bass = Math.min(1, Math.pow(bs / 9 / 255 / PRE_GAIN, 0.6) * 2.2)
     overlay.style.opacity = '1'
     overlay.style.boxShadow = `inset 0 0 ${10 + bass * 46}px hsla(${Math.round(210 - bass * 190)} 88% 62% / ${(0.06 + bass * 0.5).toFixed(3)})`
   }

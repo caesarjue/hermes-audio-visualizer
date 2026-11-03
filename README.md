@@ -16,8 +16,12 @@ Fully local: audio is analyzed in memory only (FFT via `AnalyserNode`), never re
 - **48-bar rainbow spectrum** — hue by frequency (low = red → high = violet), lightness follows amplitude
 - **Window-edge glow** — an inset glow around the whole window, driven by the actual bass range (~47–234 Hz)
 - **Adaptive sensitivity** — a slowly-decaying gain tracker so quiet tracks still fill the bars, with a contrast curve so heavy beats visibly punch
+- **Real band separation** — 2048-point FFT with a hybrid band split (40–500 Hz linear, 500–11 kHz log). The low bars each own a separate bin instead of sharing one, so they move independently
+- **Crest-friendly gain** — pre-analyser −9 dB trim + dynamic expansion + 8 % headroom: the curve rides between ~25 % and 100 % instead of pinning to the ceiling
 - **One click on/off** — click the status-bar chip, or ⌘K → "音频律动"
 - **Zero telemetry** — `getDisplayMedia` → `AnalyserNode` → canvas. Nothing leaves the process.
+
+> **2026-11 update** — three amplitude issues are fixed in this version: (1) the 8-bit `getByteFrequencyData` mapping (default −100/−30 dB) was saturating the whole low end, so every frame had a bar pinned at 100 % and the curve looked flat; (2) 512-point FFT at 48 kHz gave 93.75 Hz/bin, which collapsed the first ~14 log bands onto a single bin; (3) `raw**0.78` + peak normalisation flattened the remaining dynamics. Now: pre-gain −9 dB, 2048-point FFT, hybrid linear/log bands, `raw**1.10`, floor 0.05, 8 % top headroom.
 
 ## Requirements
 
